@@ -1,0 +1,155 @@
+
+name: Build Chromium for Android
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Build target'
+        required: true
+        default: 'chrome_public_apk'
+        type: choice
+        options:
+          - chrome_public_apk
+          - content_shell_apk
+          - webview_instrumentation_apk
+      branch:
+        description: 'Chromium branch/tag'
+        required: true
+        default: 'main'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Free disk space
+      run: |
+        sudo apt clean
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        df -h
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          curl \
+          git \
+          python3 \
+          python3-pip \
+          pkg-config \
+          ninja-build \
+          xz-utils \
+          bzip2 \
+          patchelf \
+          default-jdk-headless \
+          libtinfo5 \
+          libc6-dev-i386 \
+          libx11-dev \
+          libxext-dev \
+          libxrandr-dev \
+          libxss-dev \
+          libxtst-dev \
+          libpango1.0-dev \
+          libnss3-dev \
+          libgconf-2-4 \
+          libatk-bridge2.0-0 \
+          libgtk-3-0 \
+          libgbm-dev
+          
+    - name: Install depot_tools
+      run: |
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
+        export PATH="${{ github.workspace }}/depot_tools:${PATH}"
+        echo "DEPOT_TOOLS_PATH=${{ github.workspace }}/depot_tools" >> $GITHUB_ENV
+        
+    - name: Configure Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+    - name: Create Chromium build directory
+      run: mkdir -p chromium-build
+      
+    - name: Fetch Chromium code
+      working-directory: chromium-build
+      run: |
+        fetch --nohooks android
+        gclient sync --with_branch_heads --with_tags
+        
+    - name: Checkout specific branch/tag
+      working-directory: chromium-build/src
+      run: |
+        git fetch --tags
+        git checkout ${{ github.event.inputs.branch }}
+        
+    - name: Install additional build dependencies
+      working-directory: chromium-build/src
+      run: |
+        ./build/install-build-deps.sh --android
+        
+    - name: Run hooks
+      working-directory: chromium-build/src
+      run: gclient runhooks
+        
+    - name: Set up Android SDK
+      run: |
+        mkdir -p $HOME/android-sdk
+        cd $HOME/android-sdk
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+        unzip -q commandlinetools-linux-9477386_latest.zip
+        mkdir -p cmdline-tools/latest
+        mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+        echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
+        echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+        yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
+        
+    - name: Create output directory
+      working-directory: chromium-build/src
+      run: mkdir -p out/Default
+        
+    - name: Generate build configuration
+      working-directory: chromium-build/src
+      run: |
+        gn gen out/Default --args='target_os="android" target_cpu="arm64" is_debug=false symbol_level=0 enable_nacl=false blink_symbol_level=0 v8_symbol_level=0 treat_warnings_as_errors=false'
+        gn args out/Default --list
+        
+    - name: Build Chromium
+      working-directory: chromium-build/src
+      run: |
+        autoninja -C out/Default ${{ github.event.inputs.target }}
+        
+    - name: List build outputs
+      working-directory: chromium-build/src
+      run: |
+        echo "Build artifacts:"
+        find out/Default -name "*.apk" -o -name "*.aab" | sort
+        
+    - name: Upload APK artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: chromium-android-${{ github.event.inputs.target }}
+        path: |
+          chromium-build/src/out/Default/apks/**/*.apk
+          chromium-build/src/out/Default/*.apk
+          chromium-build/src/out/Default/*.aab
+        retention-days: 30
+        
+    - name: Upload build logs
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-logs
+        path: |
+          chromium-build/src/out/Default/build.ninja.log
+          chromium-build/src/out/Default/build_log_*.txt
+        retention-days: 7
