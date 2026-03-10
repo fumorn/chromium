@@ -26,7 +26,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       
     - name: Free disk space
       run: |
@@ -135,7 +135,7 @@ jobs:
         find out/Default -name "*.apk" -o -name "*.aab" | sort
         
     - name: Upload APK artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: chromium-android-${{ github.event.inputs.target }}
         path: |
@@ -146,7 +146,7 @@ jobs:
         
     - name: Upload build logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: build-logs
         path: |
