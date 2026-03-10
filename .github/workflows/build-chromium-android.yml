@@ -77,14 +77,32 @@ jobs:
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
+    - name: Optimize Git for large repositories and unstable network
+      run: |
+        git config --global http.postBuffer 524288000
+        git config --global http.lowSpeedLimit 0
+        git config --global http.lowSpeedTime 999999
+        echo "Git configured with increased timeouts and buffer size."
+        
     - name: Create Chromium build directory
       run: mkdir -p chromium-build
       
-    - name: Fetch Chromium code
+    - name: Fetch Chromium code (with retries)
       working-directory: chromium-build
       run: |
-        fetch --nohooks android
-        gclient sync --with_branch_heads --with_tags
+        for i in {1..3}; do
+          echo "Fetch attempt $i: Running fetch --nohooks android..."
+          fetch --nohooks android && break
+          echo "Fetch attempt $i failed. Sleeping for 30 seconds before retry..."
+          sleep 30
+        done
+        
+        for i in {1..3}; do
+          echo "Sync attempt $i: Running gclient sync..."
+          gclient sync --with_branch_heads --with_tags && break
+          echo "Sync attempt $i failed. Sleeping for 30 seconds before retry..."
+          sleep 30
+        done
         
     - name: Checkout specific branch/tag
       working-directory: chromium-build/src
