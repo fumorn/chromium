@@ -28,13 +28,28 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Free disk space
+    - name: Maximize build space
       run: |
+        echo "=== Initial disk space ==="
+        df -h
+        
+        echo "=== Cleaning package manager ==="
         sudo apt clean
+        sudo apt autoremove -y
+        
+        echo "=== Removing large pre-installed tools ==="
         sudo rm -rf /usr/share/dotnet
         sudo rm -rf /opt/ghc
         sudo rm -rf "/usr/local/share/boost"
         sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo rm -rf /opt/hostedtoolcache
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/lib/jvm
+        
+        echo "=== Cleaning docker images ==="
+        docker system prune -a -f
+        
+        echo "=== Final disk space ==="
         df -h
         
     - name: Install dependencies
@@ -65,50 +80,90 @@ jobs:
           libgtk-3-0 \
           libgbm-dev
           
-    - name: Install depot_tools
+    - name: Install depot_tools with retry
       run: |
-        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+        for i in {1..3}; do
+          echo "Attempt $i: Cloning depot_tools..."
+          if [ -d "depot_tools" ]; then
+            rm -rf depot_tools
+          fi
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git && break
+          echo "Attempt $i failed. Sleeping for 30 seconds..."
+          sleep 30
+        done
+        
         echo "${{ github.workspace }}/depot_tools" >> $GITHUB_PATH
         export PATH="${{ github.workspace }}/depot_tools:${PATH}"
         echo "DEPOT_TOOLS_PATH=${{ github.workspace }}/depot_tools" >> $GITHUB_ENV
         
-    - name: Configure Git
+    - name: Configure Git with optimized settings
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
-    - name: Optimize Git for large repositories and unstable network
-      run: |
-        git config --global http.postBuffer 524288000
+        # Optimize for large repositories
+        git config --global core.compression 0
+        git config --global http.postBuffer 1048576000
         git config --global http.lowSpeedLimit 0
         git config --global http.lowSpeedTime 999999
-        echo "Git configured with increased timeouts and buffer size."
+        git config --global http.version HTTP/1.1
+        
+        # Enable verbose output for debugging
+        git config --global transfer.verbose true
+        
+        echo "Git configured with optimized settings"
         
     - name: Create Chromium build directory
-      run: mkdir -p chromium-build
+      run: |
+        # Clean any existing build directory to save space
+        rm -rf chromium-build
+        mkdir -p chromium-build
       
-    - name: Fetch Chromium code (with retries)
+    - name: Fetch Chromium code (with comprehensive retry)
       working-directory: chromium-build
       run: |
-        for i in {1..3}; do
-          echo "Fetch attempt $i: Running fetch --nohooks android..."
-          fetch --nohooks android && break
-          echo "Fetch attempt $i failed. Sleeping for 30 seconds before retry..."
-          sleep 30
-        done
+        # Retry function
+        retry() {
+          local n=1
+          local max=3
+          local delay=60
+          while true; do
+            "$@" && break || {
+              if [[ $n -lt $max ]]; then
+                echo "Command failed. Attempt $n/$max. Sleeping $delay seconds..."
+                sleep $delay
+                ((n++))
+              else
+                echo "Command failed after $n attempts."
+                return 1
+              fi
+            }
+          done
+        }
         
-        for i in {1..3}; do
-          echo "Sync attempt $i: Running gclient sync..."
-          gclient sync --with_branch_heads --with_tags && break
-          echo "Sync attempt $i failed. Sleeping for 30 seconds before retry..."
-          sleep 30
-        done
+        # Run fetch with retry
+        echo "=== Fetching Chromium code ==="
+        retry fetch --nohooks android
+        
+        # Run gclient sync with retry and verbose output
+        echo "=== Running gclient sync ==="
+        retry gclient sync --with_branch_heads --with_tags --verbose
+        
+        echo "=== Sync completed ==="
         
     - name: Checkout specific branch/tag
       working-directory: chromium-build/src
       run: |
-        git fetch --tags
+        git fetch --tags --verbose
         git checkout ${{ github.event.inputs.branch }}
+        
+    - name: Clean up temporary git files to save space
+      working-directory: chromium-build/src
+      run: |
+        # Remove git objects that are not needed
+        git gc --aggressive --prune=now
+        rm -rf .git/refs/original
+        git reflog expire --expire=now --all
         
     - name: Install additional build dependencies
       working-directory: chromium-build/src
@@ -123,12 +178,25 @@ jobs:
       run: |
         mkdir -p $HOME/android-sdk
         cd $HOME/android-sdk
-        wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+        
+        # Download with retry
+        for i in {1..3}; do
+          echo "Attempt $i: Downloading Android SDK..."
+          wget -q --timeout=60 --tries=3 https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip && break
+          echo "Attempt $i failed. Sleeping for 30 seconds..."
+          sleep 30
+        done
+        
         unzip -q commandlinetools-linux-9477386_latest.zip
+        rm commandlinetools-linux-9477386_latest.zip  # Save space
+        
         mkdir -p cmdline-tools/latest
         mv cmdline-tools/* cmdline-tools/latest/ 2>/dev/null || true
+        
         echo "ANDROID_SDK_ROOT=$HOME/android-sdk" >> $GITHUB_ENV
         echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+        
+        # Accept licenses with retry
         yes | $HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses
         
     - name: Create output directory
